@@ -1,0 +1,5 @@
+.env
+sashiko.db
+review_trees/
+archives/
+target/
