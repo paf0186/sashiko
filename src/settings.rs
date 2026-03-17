@@ -110,6 +110,10 @@ pub struct AiSettings {
     pub temperature: f32,
     #[serde(skip, default)]
     pub no_ai: bool,
+    /// Log each AI request/response turn at info level (content previews + token counts).
+    /// Useful for debugging but verbose; disabled by default.
+    #[serde(default)]
+    pub log_turns: bool,
     // Provider-specific settings
     pub claude: Option<ClaudeSettings>,
     pub gemini: Option<GeminiSettings>,
