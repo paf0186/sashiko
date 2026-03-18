@@ -20,6 +20,7 @@ use crate::db::{AiInteractionParams, Database, Finding, PatchsetRow, Severity, T
 use crate::git_ops::{GitWorktree, ensure_remote, get_commit_hash};
 use crate::settings::Settings;
 use crate::utils::redact_secret;
+use crate::worker::prompts::ReviewError;
 use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -1490,10 +1491,9 @@ async fn run_review_tool(
                                                 if budget > 0 && total_tokens_used > budget {
                                                     error!("Token budget exceeded: {} used > {} limit — aborting review",
                                                         total_tokens_used, budget);
-                                                    return Err(anyhow::anyhow!(
-                                                        "Token budget exceeded: {} tokens used (limit: {})",
-                                                        total_tokens_used, budget
-                                                    ));
+                                                    return Err(ReviewError::BudgetExceeded(
+                                                        format!("{} tokens used (limit: {})", total_tokens_used, budget)
+                                                    ).into());
                                                 }
                                             }
                                             if let Some(tool_calls) = &p.tool_calls {

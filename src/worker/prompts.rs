@@ -15,6 +15,18 @@
 use crate::ai::{AiMessage, AiProvider, AiRequest, AiResponseFormat, AiRole};
 use crate::worker::tools::ToolBox;
 use anyhow::{Context, Result};
+
+/// Typed errors that must not be silently retried.
+#[derive(Debug, thiserror::Error)]
+pub enum ReviewError {
+    /// The AI exceeded its per-review turn limit.  Retrying with the same
+    /// limit will just hit the cap again — fail fast.
+    #[error("Max interactions exceeded")]
+    LimitExceeded,
+    /// A token budget was exceeded.  Retrying wastes tokens for no gain.
+    #[error("Token budget exceeded: {0}")]
+    BudgetExceeded(String),
+}
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -615,6 +627,12 @@ Example:
                         success = true;
                     }
                     Err(e) => {
+                        // Fail fast for structural errors — retrying would just
+                        // hit the same limit again and waste tokens/turns.
+                        if e.downcast_ref::<ReviewError>().is_some() {
+                            warn!("Stage {} hit non-retryable error: {}", stage, e);
+                            return Err(e);
+                        }
                         warn!(
                             "Stage {} failed (attempt {}/{}): {}",
                             stage, attempts, max_attempts, e
@@ -971,7 +989,7 @@ Example:
             }
         }
 
-        Err(anyhow::anyhow!("Max interactions exceeded"))
+        Err(ReviewError::LimitExceeded.into())
     }
 }
 
@@ -1173,6 +1191,36 @@ mod tests {
         assert_eq!(
             calculate_series_range(&patches, &patches_to_review, &patch_shas, "base"),
             Some("base..sha2_resolved".to_string())
+        );
+    }
+
+    // ReviewError tests
+
+    #[test]
+    fn test_limit_exceeded_downcasts_as_review_error() {
+        let err: anyhow::Error = ReviewError::LimitExceeded.into();
+        assert!(
+            err.downcast_ref::<ReviewError>().is_some(),
+            "LimitExceeded must downcast to ReviewError so the retry loop can fail fast"
+        );
+    }
+
+    #[test]
+    fn test_budget_exceeded_downcasts_as_review_error() {
+        let err: anyhow::Error =
+            ReviewError::BudgetExceeded("1000 tokens used (limit: 500)".to_string()).into();
+        assert!(
+            err.downcast_ref::<ReviewError>().is_some(),
+            "BudgetExceeded must downcast to ReviewError so the retry loop can fail fast"
+        );
+    }
+
+    #[test]
+    fn test_generic_error_does_not_downcast_as_review_error() {
+        let err: anyhow::Error = anyhow::anyhow!("transient JSON parse failure");
+        assert!(
+            err.downcast_ref::<ReviewError>().is_none(),
+            "Plain anyhow errors must NOT match ReviewError so they remain retryable"
         );
     }
 }
