@@ -624,6 +624,11 @@ Example:
             }
             if !success {
                 warn!("Stage {} failed after {} attempts.", stage, max_attempts);
+                return Err(anyhow::anyhow!(
+                    "Stage {} failed after {} attempts — aborting review",
+                    stage,
+                    max_attempts
+                ));
             }
         }
 

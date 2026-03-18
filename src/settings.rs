@@ -153,6 +153,10 @@ pub struct ReviewSettings {
     pub max_files_touched: usize,
     #[serde(default)]
     pub ignore_files: Vec<String>,
+    /// Maximum total tokens (input + output) allowed across all turns in a single review.
+    /// 0 means unlimited. Exceeding this aborts the review with an error.
+    #[serde(default)]
+    pub max_total_tokens: usize,
 }
 
 fn default_max_lines_changed() -> usize {
