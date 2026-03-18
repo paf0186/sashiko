@@ -18,9 +18,11 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
+use std::process::Stdio;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use std::process::Stdio;
+use tokio::time::timeout;
 use tracing::{debug, warn};
 
 use crate::ai::{AiProvider, AiRequest, AiResponse, AiRole, AiUsage, ProviderCapabilities, ToolCall};
@@ -43,10 +45,8 @@ impl AiProvider for ClaudeCliProvider {
             "--no-session-persistence".to_string(),
         ];
 
-        if let Some(model) = Some(&self.model) {
-            args.push("--model".to_string());
-            args.push(model.clone());
-        }
+        args.push("--model".to_string());
+        args.push(self.model.clone());
 
         let mut child = Command::new("claude")
             .args(&args)
@@ -56,12 +56,17 @@ impl AiProvider for ClaudeCliProvider {
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn claude CLI: {}. Is it installed?", e))?;
 
-        // Write prompt to stdin
+        // Write prompt to stdin then close it
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(prompt.as_bytes()).await?;
+            stdin.flush().await?;
         }
 
-        let output = child.wait_with_output().await?;
+        // 10-minute timeout per CLI call — a hung claude process won't block forever
+        let output = timeout(Duration::from_secs(600), child.wait_with_output())
+            .await
+            .map_err(|_| anyhow::anyhow!("claude CLI timed out after 10 minutes"))?
+            .map_err(|e| anyhow::anyhow!("claude CLI wait error: {}", e))?;
 
         if !output.stderr.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -239,9 +244,10 @@ fn parse_inner_response(text: &str, usage: Option<AiUsage>) -> Result<AiResponse
     }
 
     if had_json {
-        // Had valid JSON lines but no tool calls — return as content
+        // Had valid JSON lines but no tool calls — return original text as content
+        // (json_str from extract_json may be mangled if text had multiple objects)
         return Ok(AiResponse {
-            content: Some(json_str),
+            content: Some(text.to_string()),
             thought: None,
             tool_calls: None,
             usage,
@@ -307,24 +313,21 @@ fn parse_single_json(v: &Value, json_str: &str, usage: Option<AiUsage>) -> Resul
     })
 }
 
-/// Extract the innermost JSON object/array from text that may be wrapped in markdown fences.
+/// Extract JSON from text that may be wrapped in markdown fences.
+/// Returns the content inside the first fenced block, or the original text trimmed.
+/// Does NOT try to find outermost braces — that can silently produce invalid JSON
+/// when the text contains multiple objects (e.g. JSONL), which the JSONL fallback
+/// in parse_inner_response handles better.
 fn extract_json(text: &str) -> String {
-    // Strip markdown fences
-    for fence in &["```json\n", "```\n"] {
-        if let Some(start) = text.find(fence) {
-            let after = &text[start + fence.len()..];
+    // Strip markdown fences — handle both LF and CRLF, and optional language tag
+    let normalized = text.replace("\r\n", "\n");
+    for fence_start in &["```json\n", "```JSON\n", "```\n"] {
+        if let Some(start) = normalized.find(fence_start) {
+            let after = &normalized[start + fence_start.len()..];
             if let Some(end) = after.find("\n```") {
                 return after[..end].trim().to_string();
             }
         }
     }
-    // Find outermost { ... }
-    if let Some(start) = text.find('{') {
-        if let Some(end) = text.rfind('}') {
-            if end > start {
-                return text[start..=end].to_string();
-            }
-        }
-    }
-    text.trim().to_string()
+    normalized.trim().to_string()
 }
